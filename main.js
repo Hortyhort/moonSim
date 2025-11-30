@@ -394,7 +394,7 @@ class CelestialSimulation {
         side: THREE.DoubleSide,
         transparent: true,
         opacity: config.opacity,
-        depthWrite: false
+        depthWrite: true  // Enable depth writing so mountains occlude objects behind them
       });
       
       const mountainLayer = new THREE.Mesh(geometry, material);
@@ -664,7 +664,7 @@ class CelestialSimulation {
       this.earth.visible = true;
       this.orbitLines.visible = this.showOrbits;
       this.groundPlane.visible = false;
-      this.horizonRing.visible = false;
+      this.mountainLayers.forEach(layer => layer.visible = false);
       this.scene.background = new THREE.Color(0x000000);
       this.updateCameraView();
     });
@@ -846,7 +846,7 @@ class CelestialSimulation {
   }
 
   calculateMoonPosition(jd) {
-    // Simplified moon position calculation
+    // Simplified moon position calculation with latitude
     const T = (jd - 2451545.0) / 36525; // Julian centuries from J2000
     
     // Moon's mean longitude
@@ -868,6 +868,7 @@ class CelestialSimulation {
     const DRad = D * Math.PI / 180;
     const MRad = M * Math.PI / 180;
     const MprimeRad = Mprime * Math.PI / 180;
+    const FRad = F * Math.PI / 180;
     
     // Calculate longitude with main periodic terms
     let longitude = L;
@@ -880,6 +881,13 @@ class CelestialSimulation {
     longitude = longitude % 360;
     if (longitude < 0) longitude += 360;
     
+    // Calculate latitude (distance from ecliptic plane)
+    let latitude = 0;
+    latitude += 5.128 * Math.sin(FRad);
+    latitude += 0.280 * Math.sin(MprimeRad + FRad);
+    latitude += 0.277 * Math.sin(MprimeRad - FRad);
+    latitude += 0.173 * Math.sin(2 * DRad - FRad);
+    
     // Calculate angle relative to Earth-Sun line
     const sunPos = this.calculateSunPosition(jd);
     let moonPhaseAngle = longitude - sunPos.longitude;
@@ -887,6 +895,7 @@ class CelestialSimulation {
     
     return {
       longitude: longitude,
+      latitude: latitude,
       angle: (moonPhaseAngle * Math.PI / 180),
       phaseAngle: moonPhaseAngle
     };
@@ -944,9 +953,10 @@ class CelestialSimulation {
       this.earth.visible = false;
       this.orbitLines.visible = false;
       
-      // Show ground plane and mountain layers for Earth view
+      // Show ground plane, mountain layers, and moon for Earth view
       this.groundPlane.visible = true;
       this.mountainLayers.forEach(layer => layer.visible = true);
+      this.moon.visible = true; // Moon should be visible in Arizona view
       
       // Will be updated per frame in animate()
       this.updateArizonaSky();
@@ -955,8 +965,12 @@ class CelestialSimulation {
       // They represent the fixed landscape from the observer's perspective
       if (!this.arizonaLandscapeInitialized) {
         this.groundPlane.position.set(0, 0, 0);
+        this.groundPlane.rotation.x = -Math.PI / 2; // Keep horizontal
+        this.groundPlane.rotation.y = 0; // No rotation around Y axis
+        this.groundPlane.rotation.z = 0; // No rotation around Z axis
         this.mountainLayers.forEach(layer => {
           layer.position.set(0, 0, 0);
+          layer.rotation.set(0, 0, 0); // Ensure no rotation
         });
         this.arizonaLandscapeInitialized = true;
       }
@@ -970,6 +984,13 @@ class CelestialSimulation {
       this.groundPlane.visible = false;
       this.mountainLayers.forEach(layer => layer.visible = false);
       this.scene.background = new THREE.Color(0x000000);
+      
+      // Reset moon to original scale and position for space view
+      this.moon.scale.set(1, 1, 1);
+      this.moon.position.x = SCALE.MOON_ORBIT;
+      this.moon.position.y = 0;
+      this.moon.position.z = 0;
+      
       this.updateCameraPosition();
       this.arizonaLandscapeInitialized = false; // Reset for next time
     }
@@ -980,21 +1001,24 @@ class CelestialSimulation {
     const jd = this.dateToJulianDate(this.simulationDate);
     const moonPos = this.calculateMoonPosition(jd);
     
-    // Get moon's ecliptic longitude
-    const moonLongitude = moonPos.longitude * Math.PI / 180;
+    // Get moon's ecliptic longitude and latitude
+    const lambda = moonPos.longitude * Math.PI / 180;  // Ecliptic longitude
+    const beta = moonPos.latitude * Math.PI / 180;     // Ecliptic latitude
     
     // Calculate moon's right ascension (RA) and declination (Dec)
-    // Simplified conversion from ecliptic to equatorial coordinates
+    // Proper conversion from ecliptic to equatorial coordinates
     const obliquity = 23.439 * Math.PI / 180; // Obliquity of the ecliptic
     
-    // Right ascension
+    // Right ascension - accounting for latitude
     const ra = Math.atan2(
-      Math.sin(moonLongitude) * Math.cos(obliquity),
-      Math.cos(moonLongitude)
+      Math.sin(lambda) * Math.cos(obliquity) - Math.tan(beta) * Math.sin(obliquity),
+      Math.cos(lambda)
     );
     
-    // Declination
-    const dec = Math.asin(Math.sin(moonLongitude) * Math.sin(obliquity));
+    // Declination - accounting for latitude
+    const dec = Math.asin(
+      Math.sin(beta) * Math.cos(obliquity) + Math.cos(beta) * Math.sin(obliquity) * Math.sin(lambda)
+    );
     
     // Calculate Local Sidereal Time (LST)
     // Simplified formula
@@ -1013,15 +1037,17 @@ class CelestialSimulation {
                    Math.cos(latRad) * Math.cos(dec) * Math.cos(hourAngle);
     const altitude = Math.asin(sinAlt);
     
-    // Calculate azimuth (compass direction)
+    // Calculate azimuth (compass direction) using same approach as sun
+    // This matches the working sun azimuth calculation
     const cosAz = (Math.sin(dec) - Math.sin(altitude) * Math.sin(latRad)) / 
                   (Math.cos(altitude) * Math.cos(latRad));
     const clampedCosAz = Math.max(-1, Math.min(1, cosAz));
     let azimuth = Math.acos(clampedCosAz);
     
-    // Adjust azimuth based on hour angle
-    // If sin(hourAngle) is positive, the object is in the west
-    if (Math.sin(hourAngle) > 0) {
+    // Adjust azimuth based on hour angle (same as sun)
+    // Before noon/transit: object is in the east (azimuth < 180°)
+    // After noon/transit: object is in the west (azimuth > 180°)
+    if (hourAngle > 0) {
       azimuth = 2 * Math.PI - azimuth;
     }
     
@@ -1146,16 +1172,16 @@ class CelestialSimulation {
       
       // Convert to Cartesian coordinates
       // Azimuth: 0° = North, 90° = East, 180° = South, 270° = West
-      // We want: East (90°) at sunrise, South (180°) at noon, West (270°) at sunset
+      // Camera looks south, so rotate coordinate system by 90° to align correctly
       const sunDistance = 3000;
       
       // Convert altitude and azimuth to 3D position
-      // X axis = East-West (positive = East, negative = West)
-      // Y axis = Up-Down (positive = Up)
-      // Z axis = North-South (positive = South, negative = North)
+      // Astronomical: 0°=North, 90°=East, 180°=South, 270°=West
+      // Three.js: +X=East, -X=West, +Z=South, -Z=North
+      // Formula: X = r*cos(alt)*sin(az), Z = r*cos(alt)*cos(az-180°)
       const sunX = sunDistance * Math.cos(altitude) * Math.sin(azimuth);
       const sunY = sunDistance * Math.sin(altitude);
-      const sunZ = -sunDistance * Math.cos(altitude) * Math.cos(azimuth);
+      const sunZ = sunDistance * Math.cos(altitude) * Math.cos(azimuth - Math.PI);
       
       // Position sun relative to fixed landscape origin
       this.visibleSun.position.set(sunX, sunY, sunZ);
@@ -1180,32 +1206,67 @@ class CelestialSimulation {
       // Update sky conditions
       this.updateArizonaSky();
       
-      // Calculate realistic moon position for Arizona observer
-      const moonSkyPos = this.calculateMoonAltitudeAzimuth();
+      // Ultra-simple approach: Moon follows same path as sun, just offset by its phase
+      // This guarantees correct east-to-west movement
       
-      // Position moon in the sky based on calculated altitude and azimuth
-      // Relative to fixed landscape origin
-      const moonDistance = 1000; // Distance for visual positioning
-      const moonX = moonDistance * Math.cos(moonSkyPos.altitude) * Math.sin(moonSkyPos.azimuth);
-      const moonY = moonDistance * Math.sin(moonSkyPos.altitude);
-      const moonZ = -moonDistance * Math.cos(moonSkyPos.altitude) * Math.cos(moonSkyPos.azimuth);
+      const moonDistance = 6000;
       
-      // Update moon's position relative to fixed landscape
+      // Get moon phase to determine offset from sun
+      const jd = this.dateToJulianDate(this.simulationDate);
+      const moonPos = this.calculateMoonPosition(jd);
+      const phaseAngleDeg = moonPos.phaseAngle; // 0-360 degrees
+      
+      // Moon is offset from sun by its phase angle
+      // Full moon (180°) = opposite sun (12 hours offset)
+      // New moon (0°) = near sun (0 hours offset)
+      const hoursOffset = (phaseAngleDeg / 360) * 24;
+      const moonLocalTime = (this.localTime + hoursOffset) % 24;
+      
+      // Calculate moon position exactly like sun, but at offset time
+      const dayOfYear = this.getDayOfYear(this.simulationDate);
+      const declination = -23.5 * Math.cos((2 * Math.PI / 365) * (dayOfYear + 10)) * Math.PI / 180;
+      const moonHourAngle = (moonLocalTime - 12) * 15 * Math.PI / 180;
+      const latRad = this.arizonaLatitude * Math.PI / 180;
+      
+      const sinAltitude = Math.sin(latRad) * Math.sin(declination) + 
+                         Math.cos(latRad) * Math.cos(declination) * Math.cos(moonHourAngle);
+      const altitude = Math.asin(sinAltitude);
+      
+      const cosAzimuth = (Math.sin(declination) - Math.sin(altitude) * Math.sin(latRad)) / 
+                         (Math.cos(altitude) * Math.cos(latRad));
+      const clampedCosAzimuth = Math.max(-1, Math.min(1, cosAzimuth));
+      let azimuth = Math.acos(clampedCosAzimuth);
+      
+      if (moonHourAngle > 0) {
+        azimuth = 2 * Math.PI - azimuth;
+      }
+      
+      // Same coordinate conversion as sun
+      const moonX = moonDistance * Math.cos(altitude) * Math.sin(azimuth);
+      const moonY = moonDistance * Math.sin(altitude);
+      const moonZ = moonDistance * Math.cos(altitude) * Math.cos(azimuth - Math.PI);
+      
       this.moon.position.set(moonX, moonY, moonZ);
+      this.moon.visible = altitude > 0;
+      
+      // Scale moon to match sun's apparent size in the sky (same angular size)
+      // Sun is radius 20 at distance 3000, Moon should be scaled proportionally at distance 6000
+      const sunAngularSize = 20 / 3000;  // Sun's angular size
+      const moonScaleForSameSize = (moonDistance * sunAngularSize) / SCALE.MOON_RADIUS;
+      this.moon.scale.set(moonScaleForSameSize, moonScaleForSameSize, moonScaleForSameSize);
+      
+      // Apply correct moon phase rotation
+      // The phase angle determines how much of the moon is illuminated
+      const phaseAngle = moonPos.phaseAngle * Math.PI / 180;
+      this.moon.rotation.y = phaseAngle;
       
       // Position camera at fixed ground level (observer's position on landscape)
       this.camera.position.set(0, 2, 0); // Slightly above ground at origin
       
-      // Calculate look direction
-      if (moonSkyPos.isAboveHorizon) {
-        // Moon is above horizon - look at moon
-        this.camera.lookAt(new THREE.Vector3(moonX, moonY, moonZ));
-      } else {
-        // Moon below horizon - look at horizon in moon's direction
-        const horizonX = 100 * Math.sin(moonSkyPos.azimuth);
-        const horizonZ = -100 * Math.cos(moonSkyPos.azimuth);
-        this.camera.lookAt(new THREE.Vector3(horizonX, 2, horizonZ));
-      }
+      // Look at a fixed direction (south, slightly upward) so horizon stays still
+      // This simulates standing on Earth and looking at the sky
+      // User sees celestial objects move across the sky, but the horizon/mountains stay fixed
+      this.camera.lookAt(new THREE.Vector3(0, 50, 100)); // Looking south and slightly up
       
       // Adjust field of view for more realistic sky viewing
       this.camera.fov = 60;
